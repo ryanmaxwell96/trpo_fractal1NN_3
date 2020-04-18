@@ -7,13 +7,15 @@ Overview of functions: Policy->TRPO->LogProb
 
 Written by Patrick Coady (pat-coady.github.io)
 """
+import numpy as np
+
+import tensorflow as tf
+
 import tensorflow.keras.backend as K
 from tensorflow.keras import Model
 from tensorflow.keras.layers import Dense, Layer
 from tensorflow.keras.optimizers import Adam
-import numpy as np
 
-import tensorflow as tf
 tf.config.experimental_run_functions_eagerly(True) # solves the 'tried to create variables on non-first call' issue
 
 # from keras.utils.vis_utils import plot_model
@@ -44,16 +46,6 @@ class Policy(object):
         # plot_model(self.trpo,to_file='model.png',show_shapes=True)
         self.lr = self.policy.get_lr()  # lr calculated based on size of PolicyNN
         self.trpo.compile(optimizer=Adam(self.lr * self.lr_multiplier)) # Configures model for training
-        
-        logdir = "/subclassed_model_logdir"
-        xs = np.ones([29,])
-        ys = np.zeros([8,])
-        self.trpo.fit(xs,ys,epochs=1,callbacks=tf.keras.callbacks.TensorBoard(logdir)) 
-        writer = summary_ops_v2.create_file_writer_v2(logdir)
-        with writer.as_default():
-            summary_ops_v2.graph(self.trpo.call.get_concrete_function(xs).graph)  # <--
-            writer.flush()
-
         self.logprob_calc = LogProb()
         # plot_model(self.model, to_file='model.png', show_shapes=True)
 
@@ -139,6 +131,23 @@ class Policy(object):
                     'KL': kl,
                     'Beta': self.beta,
                     '_lr_multiplier': self.lr_multiplier})
+
+    # NEW >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+    @tf.function
+    def grapher(self, bl,c,layersizes,dropout,deepest,obs_dim,kl_targ, init_logvar):
+        eta = 50
+        model = TRPO(bl,c,layersizes,dropout,deepest,obs_dim,kl_targ, init_logvar, eta)
+        model.compile(loss="binary_crossentropy", optimizer="adam")
+        logdir = "/subclassed_model_logdir"
+        xs = np.ones([29,])
+        ys = np.zeros([8,])
+        model.fit(xs,ys,epochs=1,callbacks=tf.keras.callbacks.TensorBoard(logdir)) 
+        writer = summary_ops_v2.create_file_writer_v2(logdir)
+        with writer.as_default():
+            summary_ops_v2.graph(model.call.get_concrete_function(xs).graph)
+            writer.flush()
+
+    # NEW >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 
 class PolicyNN(Layer):
     """ Neural net for policy approximation function.
@@ -249,7 +258,7 @@ class LogProb(Layer):
         return logp
 
 
-class TRPO(Model):
+class TRPO(tf.keras.Model):
     # Need to explicitly call Model so that it becomes <tensorflow.python.keras.engine.training.Model object at 0x7faf5712ddd8>
     # Right now, it is <class 'tensorflow.python.keras.engine.training.Model'>
     # Then I should be able to call model.fit !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
