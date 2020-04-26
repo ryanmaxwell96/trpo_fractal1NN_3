@@ -7,22 +7,18 @@ Overview of functions: Policy->TRPO->LogProb
 
 Written by Patrick Coady (pat-coady.github.io)
 """
-import numpy as np
-
-import tensorflow as tf
-
 import tensorflow.keras.backend as K
 from tensorflow.keras import Model
 from tensorflow.keras.layers import Dense, Layer
 from tensorflow.keras.optimizers import Adam
+import numpy as np
 
+import tensorflow as tf
 tf.config.experimental_run_functions_eagerly(True) # solves the 'tried to create variables on non-first call' issue
 
 # from keras.utils.vis_utils import plot_model
 from fractalnet_regularNN import *
 
-
-from tensorflow.python.ops import summary_ops_v2
 
 
 # Called in train.py in line 292. This is the highest level function
@@ -55,12 +51,12 @@ class Policy(object):
 
     def sample(self, obs):
         """Draw sample from policy."""
-        act_means, act_logvars = self.policy(obs) # give the current state (obs) and it will output what the current estimate for the mean and var is for that state
+        act_means, act_logvars = self.policy(obs,0) # give the current state (obs) and it will output what the current estimate for the mean and var is for that state
         act_stddevs = np.exp(act_logvars / 2)
         temp = np.random.normal(act_means, act_stddevs).astype(np.float32)
         return temp
     
-    def update(self, observes, actions, advantages, logger, disc_sum_rew):
+    def update(self, observes, actions, advantages, logger):
         # x = observes
         # y = disc_sum_rew
         # tf.TensorArray(x.dtype, 0, dynamic_size=True)
@@ -100,19 +96,33 @@ class Policy(object):
 
         K.set_value(self.trpo.optimizer.lr, self.lr * self.lr_multiplier)
         K.set_value(self.trpo.beta, self.beta)
-        old_means, old_logvars = self.policy(observes)
+        # print('about to run policy_nn')
+        # input('')
+        old_means, old_logvars = self.policy(observes,1)
+        # print('ran policy_nn')
+        # input('')
         old_means = old_means.numpy()
         old_logvars = old_logvars.numpy()
+        # print('about to run LogProb_calc')
+        # input('')
         old_logp = self.logprob_calc([actions, old_means, old_logvars])
+        # print('ran LogProb_calc')
+        # input('')
         old_logp = old_logp.numpy()
         loss, kl, entropy = 0, 0, 0
         for e in range(self.epochs):
             # 'train_on_batch' and 'predict_on_batch' are both functions
             # within Keras which was called with 'Model' input to 'TRPO'
-            loss = self.trpo.train_on_batch([observes, actions, advantages,
-                                             old_means, old_logvars, old_logp])
-            kl, entropy = self.trpo.predict_on_batch([observes, actions, advantages,
+            print('about to run train_on_batch')
+            # input('')
+            loss = self.trpo.train_on_batch([observes, actions, advantages, # This took 11280-9781 on the 20th episode (after the first call-the other calls took very little in comparison)
+                                             old_means, old_logvars, old_logp]) # Took 8486-7568 on 60th episode
+            # print('ran train_on_batch. About to run predict_on_batch')
+            # input('')
+            kl, entropy = self.trpo.predict_on_batch([observes, actions, advantages, # This took very little
                                                       old_means, old_logvars, old_logp])
+            # print('ran predict_on_batch')
+            # input('')
             kl, entropy = np.mean(kl), np.mean(entropy)
             if kl > self.kl_targ * 4:  # early stopping if D_KL diverges badly
                 break
@@ -131,23 +141,6 @@ class Policy(object):
                     'KL': kl,
                     'Beta': self.beta,
                     '_lr_multiplier': self.lr_multiplier})
-
-    # NEW >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-    @tf.function
-    def grapher(self, bl,c,layersizes,dropout,deepest,obs_dim,kl_targ, init_logvar):
-        eta = 50
-        model = TRPO(bl,c,layersizes,dropout,deepest,obs_dim,kl_targ, init_logvar, eta)
-        model.compile(loss="binary_crossentropy", optimizer="adam")
-        logdir = "/subclassed_model_logdir"
-        xs = np.ones([29,])
-        ys = np.zeros([8,])
-        model.fit(xs,ys,epochs=1,callbacks=tf.keras.callbacks.TensorBoard(logdir)) 
-        writer = summary_ops_v2.create_file_writer_v2(logdir)
-        with writer.as_default():
-            summary_ops_v2.graph(model.call.get_concrete_function(xs).graph)
-            writer.flush()
-
-    # NEW >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 
 class PolicyNN(Layer):
     """ Neural net for policy approximation function.
@@ -186,7 +179,7 @@ class PolicyNN(Layer):
         logvar_speed = (10 * hid3_units) // 48
         logvar_speed = 16
         # 'add_weight' creates a trainable weight variable for this layer
-        self.logvars = self.add_weight(shape=(logvar_speed, int(self.layersizes[4][0])),
+        self.logvars = self.add_weight(shape=(logvar_speed, self.layersizes[3]), # THIS NEEDS TO BE CHANGED !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
                                        trainable=True, initializer='zeros')
         print('Policy Params -- lr: {:.3g}, logvar_speed: {}'
               .format(self.lr, logvar_speed))
@@ -194,19 +187,35 @@ class PolicyNN(Layer):
     def build(self, input_shape):
         self.batch_sz = input_shape[0] # input_shape = (1,27)
 
-    def call(self, inputs, **kwargs):
+    def call(self, inputs,printing, **kwargs):
         # print("inputs") # inputs, obs_dim (1,27) tensor for halfcheetah
         # print(inputs)
         # y = self.dense1(inputs) # hid1 (1,270) tensor for halfcheetah
         # y = self.dense2(y) # hid2 (1,127) tensor for halfcheetah
         # y = self.dense3(y) # hid3 (1,60) tensor for halfcheetah
         # means = self.dense4(y) # (1,6) tensor for halfcheetah. 
-        means = fractal_net(self,bl=self.bl,c=self.c,layersizes=self.layersizes,
+        # if printing == 1:
+        	# print('about to run fractal_net')
+        	# input('')
+        means = fractal_net(self,bl=self.bl,c=self.c,layersizes=self.layersizes, # This took 11877-11283 data on the 20th episode
             drop_path=0.15,dropout=self.dropout,
             deepest=self.deepest)(inputs)
+
+        if printing == 1:
+        	# print('ran fractal_net')
+        	# input('')
+        	# print('means')
+        	# print(means)
+        	logvars = K.sum(self.logvars, axis=0, keepdims=True) + self.init_logvar
+        	# print('logvars')
+        	# print(logvars)
+        	logvars = K.tile(logvars, (self.batch_sz, 1))
+        	# print('logvars with title')
+        	# print(logvars)
+        	# print('means')
+        	# print(means)
         logvars = K.sum(self.logvars, axis=0, keepdims=True) + self.init_logvar
         logvars = K.tile(logvars, (self.batch_sz, 1))
-       
         return [means, logvars]
 
     def get_lr(self):
@@ -258,7 +267,7 @@ class LogProb(Layer):
         return logp
 
 
-class TRPO(tf.keras.Model):
+class TRPO(Model):
     # Need to explicitly call Model so that it becomes <tensorflow.python.keras.engine.training.Model object at 0x7faf5712ddd8>
     # Right now, it is <class 'tensorflow.python.keras.engine.training.Model'>
     # Then I should be able to call model.fit !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -277,7 +286,7 @@ class TRPO(tf.keras.Model):
 
     def call(self, inputs):
         obs, act, adv, old_means, old_logvars, old_logp = inputs # array called in Policy to update policy in 'update' 'train_on_batch' and 'predict_on_batch'
-        new_means, new_logvars = self.policy(obs) # PolicyNN 'call' func that outputs the new means and log-vars under current policy
+        new_means, new_logvars = self.policy(obs,0) # PolicyNN 'call' func that outputs the new means and log-vars under current policy
         new_logp = self.logprob([act, new_means, new_logvars])
         kl, entropy = self.kl_entropy([old_means, old_logvars,
                                        new_means, new_logvars])

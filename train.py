@@ -22,6 +22,8 @@ https://github.com/joschu/modular_rl
 This implementation learns policies for continuous environments
 in the OpenAI Gym (https://gym.openai.com/). Testing was focused on
 the MuJoCo control tasks.
+
+Biggest memory hogs so far: train_on_batch > fractal_net > predict_on_batch
 """
 import gym
 import pybullet
@@ -93,30 +95,27 @@ def run_episode(env, policy, scaler, animate=True):
     scale, offset = scaler.get()
     scale[-1] = 1.0  # don't scale time step feature
     offset[-1] = 0.0  # don't offset time step feature
-    counter = 0
 
     while not done:
-   	    if animate:
-   	     	env.render()
-   	    obs = np.concatenate([obs, [step]])  # add time step feature
-   	    obs = obs.astype(np.float32).reshape((1, -1))
-   	    unscaled_obs.append(obs)
-   	    obs = np.float32((obs - offset) * scale)  # center and scale observations
-   	    observes.append(obs)
-   	    action = policy.sample(obs)
-   	    actions.append(action)
-   	    obs, reward, done, _ = env.step(action.flatten())
-   	    rewards.append(reward)
-   	    step += 1e-3  # increment time step feature
-   	    counter += 1
-   	    print('# of steps in current episode')
-   	    print(counter)
+        if animate:
+            env.render()
+        obs = np.concatenate([obs, [step]])  # add time step feature
+        obs = obs.astype(np.float32).reshape((1, -1))
+        unscaled_obs.append(obs)
+        obs = np.float32((obs - offset) * scale)  # center and scale observations
+        observes.append(obs)
+        action = policy.sample(obs)
+        # print('action sampled from current policyNN')
+        actions.append(action)
+        obs, reward, done, _ = env.step(action.flatten())
+        rewards.append(reward)
+        step += 1e-3  # increment time step feature
 
     return (np.concatenate(observes), np.concatenate(actions),
             np.array(rewards, dtype=np.float32), np.concatenate(unscaled_obs))
 
 
-def run_policy(env, policy, scaler, logger, episodes):
+def run_policy(episode,env, policy, scaler, logger, episodes):
     """ Run policy and collect data for a minimum of min_steps and min_episodes
 
     Args:
@@ -136,9 +135,9 @@ def run_policy(env, policy, scaler, logger, episodes):
     total_steps = 0
     trajectories = []
     for e in range(episodes):
-        print('# of epsiodes run!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
-        print(e)
         observes, actions, rewards, unscaled_obs = run_episode(env, policy, scaler)
+        print('overall number of epsiodes!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!1')
+        print(episode)
         # print(observes.shape)
         # print(actions.shape)
         # print(rewards.shape)
@@ -246,10 +245,11 @@ def build_train_set(trajectories):
     actions = np.concatenate([t['actions'] for t in trajectories])
     disc_sum_rew = np.concatenate([t['disc_sum_rew'] for t in trajectories])
     advantages = np.concatenate([t['advantages'] for t in trajectories])
+    values = np.concatenate([t['values'] for t in trajectories])
     # normalize advantages
     advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-6)
 
-    return observes, actions, advantages, disc_sum_rew
+    return observes, actions, advantages, disc_sum_rew, values
 
 
 def log_batch_stats(observes, actions, advantages, disc_sum_rew, logger, episode):
@@ -302,26 +302,29 @@ def main(env_name, num_episodes, gamma, lam, deepest,bl,c,kl_targ, batch_size, i
     env = wrappers.Monitor(env, aigym_path, force=True)
     scaler = Scaler(obs_dim)
 
-    layersizes = [(32,+120),(512,-96),(128,-24),(32,-6),(8,0),(8,0)] # 2nd term - amount to add three times, once for each new base layer
+    # layersizes = [(512,-96),(128,-24),(32,-6),(8,0)]
+    # layersizes = [(512,0),(128,0),(32,0),(8,0)] # 2nd term - amount to add three times, once for each new base layer
+    layersizes = [512,128,32,8]
     dropout = [0., 0.1, 0.2, 0.3, 0.4] # NEW
     deepest = False
 
     val_func = NNValueFunction(obs_dim) # Initialize the value function
     policy = Policy(bl,c,layersizes,dropout,deepest,obs_dim,kl_targ, init_logvar)
-    policy.grapher(bl,c,layersizes,dropout,deepest,obs_dim,kl_targ, init_logvar)
-
+    
     # print('val_func')
     # print(val_func)
     # print('policy')
     # print(policy)
     # input('')
     # run a few episodes of untrained policy to initialize scaler:
-    run_policy(env, policy, scaler, logger, episodes=5) # !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    run_policy(0,env, policy, scaler, logger, episodes=5) # !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
     episode = 0
     counter = 0
     # This is the main loop. Currently has a default of 1000 episodes
     while episode < num_episodes:
-        trajectories = run_policy(env, policy, scaler, logger, episodes=batch_size) # batch_size is the number of trials to run on the current policy
+        print('episode')
+        print(episode)
+        trajectories = run_policy(episode,env, policy, scaler, logger, episodes=batch_size) # batch_size is the number of trials to run on the current policy
         # This must add the length of trajectories which should be the
         # same as batch_size (default is 20)
         episode += len(trajectories)
@@ -330,14 +333,20 @@ def main(env_name, num_episodes, gamma, lam, deepest,bl,c,kl_targ, batch_size, i
         add_disc_sum_rew(trajectories, gamma)  # calculated discounted sum of Rs
         add_gae(trajectories, gamma, lam)  # calculate advantage
         # concatenate all episodes into single NumPy arrays
-        observes, actions, advantages, disc_sum_rew = build_train_set(trajectories)
+        observes, actions, advantages, disc_sum_rew, values = build_train_set(trajectories)
         # print('built training set')
         # input('')
         # add various stats to training log:
         log_batch_stats(observes, actions, advantages, disc_sum_rew, logger, episode)
-        policy.update(observes, actions, advantages, logger, disc_sum_rew)  # update policy
-        val_func.fit(observes, disc_sum_rew, logger)  # update value function
+        policy.update(observes, actions, advantages, logger)  # update policy
+        # print('ran policy.update')
+        # input('')
+        val_func.fit(observes, disc_sum_rew, logger)  # update value function # Took no extra memory
+        # print('ran val_func.fit')
+        # input('')
         logger.write(display=True)  # write logger results to file and stdout
+        # print('ran logger.write')
+        # input('')
         # print('number of episodes run')
         # print(counter)
         # input('')
@@ -353,18 +362,18 @@ if __name__ == "__main__":
                                                   'using Proximal Policy Optimizer'))
     parser.add_argument('env_name', type=str, help='OpenAI Gym (PyBullet) environment name')
     parser.add_argument('-n', '--num_episodes', type=int, help='Number of episodes to run',
-                        default=1000)
-    parser.add_argument('-g', '--gamma', type=float, help='Discount factor', default=0.995)
+                        default=30000)
+    parser.add_argument('-g', '--gamma', type=float, help='Discount factor', default=0.99)
     parser.add_argument('-l', '--lam', type=float, help='Lambda for Generalized Advantage Estimation',
-                        default=0.98)
+                        default=1)
     parser.add_argument('-deepest', type=bool,help='Build with only deepest column activated',
                         default=False)
     parser.add_argument('-bl', type=int,help='Number of fractal blocks',
-                        default=5)
+                        default=4)
     parser.add_argument('-c', type=int,help='width of fractal blocks',
                         default=3)
     parser.add_argument('-k', '--kl_targ', type=float, help='D_KL target value',
-                        default=0.003)
+                        default=0.001)
     parser.add_argument('-b', '--batch_size', type=int,
                         help='Number of episodes per training batch',
                         default=20) #!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
